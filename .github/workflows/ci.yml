@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  query-api:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: query-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Run query API tests
+        run: uv run --extra dev pytest -q
+      - name: Compile query API
+        run: uv run python -m compileall paperlists_api
+
+  mcp-server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Compile MCP server
+        run: uv run python -m compileall paperlists_mcp
+
+  skill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile bundled CLI
+        run: python3 -m compileall skill/scripts/paperlists.py

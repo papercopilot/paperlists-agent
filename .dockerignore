@@ -1,0 +1,14 @@
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.venv
+**/*.egg-info
+.git
+.gitignore
+docs/
+mcp-server/
+skill/
+query-api/tests/
+*.db
+*.db-wal
+*.db-shm

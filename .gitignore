@@ -1,0 +1,44 @@
+# Python
+.history
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Paperlists query-api artifacts (built locally, never committed)
+papers.db
+papers.db-wal
+papers.db-shm
+query-api/papers.db*
+query-api/.venv/
+mcp-server/.venv/
+query-api/uv.lock
+mcp-server/uv.lock
