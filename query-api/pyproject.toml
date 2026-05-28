@@ -1,6 +1,6 @@
 [project]
 name = "paperlists-api"
-version = "0.1.0"
+version = "0.2.0"
 description = "Hosted query API over the papercopilot/paperlists corpus."
 requires-python = ">=3.10"
 dependencies = [

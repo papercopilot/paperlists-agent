@@ -94,7 +94,10 @@ Common params: `q` (query), `conferences` (comma list like `iclr,nips,icml`),
 trend, ranking, and `author_trajectory` endpoints — including `top_papers`). Pass
 `exclude_rejected=false` only when you explicitly want raw corpus diagnostics
 that include Reject / Withdraw entries. Abstracts are off by default to control
-egress — pass `include_abstract=true` only if you need the full text.
+egress — pass `include_abstract=true` only if you need the full text. Query
+endpoints also accept `match_mode=phrase` (default) or `match_mode=token_and`
+for broader sensitivity checks. Use `match_mode=alias_or` when the direction has
+common acronym/name variants, such as `RAG` and `retrieval augmented generation`.
 
 ### Response shape notes
 
@@ -104,7 +107,20 @@ egress — pass `include_abstract=true` only if you need the full text.
 - `search_papers` returns `{total_matches, returned, offset, limit, has_more, results, ...}`.
   Use `has_more` and `offset` to paginate; never assume `results` is exhaustive.
   (`total` is kept as a back-compat alias for one release; prefer `total_matches`.)
-  The hosted API caps `offset` at 10k to avoid expensive deep pagination.
+  The hosted API caps `offset` at 10k and rejects overly broad searches with
+  `too_many_matches` to protect the Railway deployment; narrow by phrase, year,
+  venue, or aliases instead of asking for generic terms like `model`.
+- Query endpoints echo `match_mode`, `query_expression`, and alias/filter
+  metadata. Treat big differences between `phrase`, `token_and`, and `alias_or`
+  as a sensitivity warning, not as interchangeable counts.
+- `topic_evolution`, `compare_periods`, and `field_landscape` suppress keyword
+  variants that merely restate the query. Inspect `query_noise_filter`,
+  `suppressed_query_keywords`, or `keyword_diff_suppressed_query_terms` when
+  you need to explain what was filtered.
+- For longitudinal summaries, prefer `topic_evolution.keyword_drift.grew`,
+  `.emerged`, and `.faded` over manually eyeballing every window. This is the
+  intended surface for claims like "reinforcement learning grew 6 -> 91 under
+  LLM reasoning"; then cite window-level `top_keywords` as supporting detail.
 - `compare_periods` returns each period as `{years: [a, b], year_from, year_to, n_papers}`
   — both shapes are populated, pick whichever is more ergonomic. It also
   returns `venue_diff` alongside keyword, author, and affiliation diffs.
@@ -146,7 +162,9 @@ scripts/paperlists.py conference_stats conf=iclr year=2024
 scripts/paperlists.py author_trajectory name="Yann LeCun" year_from=2020 conferences=iclr,nips,icml
 ```
 Use the canonical full name as it appears on publications. Very broad names
-return `too_many_matches`; narrow by full name, year range, or venue.
+return `too_many_matches`; narrow by full name, year range, or venue. Each paper
+includes `author_position` and `n_authors`, so down-rank senior-author tail
+papers when the user asks what a researcher is directly driving.
 
 ## Efficiency tips for agents
 
@@ -162,8 +180,13 @@ return `too_many_matches`; narrow by full name, year range, or venue.
   ("in-context learning" works). Operators (`OR`, `NOT`, `NEAR`), prefix
   (`reason*`), column filters (`title:diffusion`), and explicit quote syntax
   are **NOT** parsed in the default mode — input is tokenized into one safe
-  phrase. Pass `raw=true` on the endpoint when you need full FTS5 syntax
-  (malformed expressions then return HTTP 400).
+  phrase. Use `match_mode=token_and` for a broader sensitivity check,
+  `match_mode=alias_or` for known acronym/name variants, and pass `raw=true`
+  only when you need full FTS5 syntax (malformed expressions then return HTTP 400).
+- **For high-stakes longitudinal claims**, compare `match_mode=phrase` against
+  `match_mode=token_and` and `match_mode=alias_or`. If they change the story
+  materially, report the result as query-sensitive and inspect examples before
+  making a strong claim.
 
 ## Bundled script
 

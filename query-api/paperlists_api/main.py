@@ -24,6 +24,43 @@ API_TITLE = "Paperlists Query API"
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 MAX_OFFSET = 10_000
+_MATCH_MODE_PATTERN = f"^({'|'.join(queries.MATCH_MODES)})$"
+
+
+def _first_env(*names: str) -> Optional[str]:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
+
+
+def _build_info() -> dict:
+    """Expose enough deploy identity for clients to reject stale endpoints."""
+    return {
+        "version": __version__,
+        "git_sha": _first_env(
+            "PAPERLISTS_GIT_SHA",
+            "RAILWAY_GIT_COMMIT_SHA",
+            "GIT_COMMIT_SHA",
+            "SOURCE_VERSION",
+        ),
+        "git_branch": _first_env(
+            "PAPERLISTS_GIT_BRANCH",
+            "RAILWAY_GIT_BRANCH",
+            "GIT_BRANCH",
+        ),
+        "deployment_id": _first_env(
+            "PAPERLISTS_DEPLOYMENT_ID",
+            "RAILWAY_DEPLOYMENT_ID",
+            "RAILWAY_SNAPSHOT_ID",
+        ),
+        "environment": _first_env(
+            "RAILWAY_ENVIRONMENT",
+            "RAILWAY_ENVIRONMENT_NAME",
+            "PAPERLISTS_ENVIRONMENT",
+        ),
+    }
 
 app = FastAPI(
     title=API_TITLE,
@@ -173,12 +210,18 @@ def root():
             "/v1/top_papers/{conf}/{year}",
         ],
         "source": "https://github.com/papercopilot/paperlists",
+        "api": _build_info(),
     }
 
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "db": str(DB_PATH), "db_exists": DB_PATH.exists()}
+    return {
+        "ok": True,
+        "db": str(DB_PATH),
+        "db_exists": DB_PATH.exists(),
+        "api": _build_info(),
+    }
 
 
 @app.get("/v1/coverage")
@@ -190,7 +233,9 @@ def coverage():
 @app.get("/v1/corpus_manifest")
 def corpus_manifest():
     with connect() as conn:
-        return queries.corpus_manifest(conn)
+        manifest = queries.corpus_manifest(conn)
+    manifest["api"] = _build_info()
+    return manifest
 
 
 _RAW_DESC = (
@@ -198,6 +243,11 @@ _RAW_DESC = (
     "(`foo OR bar`, `\"exact phrase\"`, `title:diffusion`, `reason*`) at "
     "the cost of HTTP 400 on syntax errors. Default false: input is "
     "tokenized into one safe quoted phrase."
+)
+_MATCH_MODE_DESC = (
+    "Non-raw matching strategy. phrase is high precision and the default; "
+    "token_and is broader; alias_or expands known acronym/name variants "
+    "(for example RAG OR retrieval augmented generation)."
 )
 
 
@@ -213,6 +263,7 @@ def search(
     order_by: str = Query("relevance", pattern="^(relevance|year_desc|citation_desc|rating_desc)$"),
     include_abstract: bool = Query(False, description="Include abstract in each result. Off by default to control egress."),
     raw: bool = Query(False, description=_RAW_DESC),
+    match_mode: str = Query(queries.MATCH_MODE_PHRASE, pattern=_MATCH_MODE_PATTERN, description=_MATCH_MODE_DESC),
 ):
     _validate_year_range(year_from, year_to, "year")
     confs = [c.strip().lower() for c in conferences.split(",")] if conferences else None
@@ -224,7 +275,7 @@ def search(
             exclude_rejected=exclude_rejected,
             limit=limit, offset=offset, order_by=order_by,
             include_abstract=include_abstract,
-            raw=raw,
+            raw=raw, match_mode=match_mode,
         )
 
 
@@ -245,6 +296,7 @@ def topic_trend(
     year_to: Optional[int] = Query(None, ge=1990, le=2100),
     exclude_rejected: bool = Query(True),
     raw: bool = Query(False, description=_RAW_DESC),
+    match_mode: str = Query(queries.MATCH_MODE_PHRASE, pattern=_MATCH_MODE_PATTERN, description=_MATCH_MODE_DESC),
 ):
     _validate_year_range(year_from, year_to, "year")
     confs = [c.strip().lower() for c in conferences.split(",")] if conferences else None
@@ -253,6 +305,7 @@ def topic_trend(
             conn, q=q, conferences=confs,
             year_from=year_from, year_to=year_to,
             exclude_rejected=exclude_rejected, raw=raw,
+            match_mode=match_mode,
         )
 
 
@@ -266,6 +319,7 @@ def topic_evolution(
     conferences: Optional[str] = Query(None),
     exclude_rejected: bool = Query(True),
     raw: bool = Query(False, description=_RAW_DESC),
+    match_mode: str = Query(queries.MATCH_MODE_PHRASE, pattern=_MATCH_MODE_PATTERN, description=_MATCH_MODE_DESC),
 ):
     _validate_year_range(year_from, year_to, "year")
     confs = [c.strip().lower() for c in conferences.split(",")] if conferences else None
@@ -274,6 +328,7 @@ def topic_evolution(
             conn, q=q, year_from=year_from, year_to=year_to,
             window=window, top_k=top_k, conferences=confs,
             exclude_rejected=exclude_rejected, raw=raw,
+            match_mode=match_mode,
         )
 
 
@@ -303,13 +358,14 @@ def field_landscape(
     conferences: Optional[str] = Query(None),
     exclude_rejected: bool = Query(True),
     raw: bool = Query(False, description=_RAW_DESC),
+    match_mode: str = Query(queries.MATCH_MODE_PHRASE, pattern=_MATCH_MODE_PATTERN, description=_MATCH_MODE_DESC),
 ):
     confs = [c.strip().lower() for c in conferences.split(",")] if conferences else None
     with connect() as conn:
         return queries.field_landscape(
             conn, q=q, year=year, top_k=top_k,
             conferences=confs, exclude_rejected=exclude_rejected,
-            raw=raw,
+            raw=raw, match_mode=match_mode,
         )
 
 
@@ -324,6 +380,7 @@ def compare_periods(
     conferences: Optional[str] = Query(None),
     exclude_rejected: bool = Query(True),
     raw: bool = Query(False, description=_RAW_DESC),
+    match_mode: str = Query(queries.MATCH_MODE_PHRASE, pattern=_MATCH_MODE_PATTERN, description=_MATCH_MODE_DESC),
 ):
     _validate_year_range(period_a_from, period_a_to, "period_a")
     _validate_year_range(period_b_from, period_b_to, "period_b")
@@ -337,6 +394,7 @@ def compare_periods(
             conferences=confs,
             exclude_rejected=exclude_rejected,
             raw=raw,
+            match_mode=match_mode,
         )
 
 

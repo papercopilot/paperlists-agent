@@ -105,6 +105,7 @@ def test_corpus_manifest_route_returns_manifest(monkeypatch, tmp_path: Path) -> 
             conn.close()
 
     monkeypatch.setattr(main, "connect", _test_connect)
+    monkeypatch.setenv("PAPERLISTS_GIT_SHA", "abc123")
 
     resp = TestClient(main.app).get("/v1/corpus_manifest")
 
@@ -112,3 +113,21 @@ def test_corpus_manifest_route_returns_manifest(monkeypatch, tmp_path: Path) -> 
     body = resp.json()
     assert body["total_papers"] == 1
     assert body["source_manifest_available"] is False
+    assert body["api"]["version"] == main.__version__
+    assert body["api"]["git_sha"] == "abc123"
+
+
+def test_root_and_healthz_expose_api_identity(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+    from paperlists_api import main
+
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "railway-sha")
+    client = TestClient(main.app)
+
+    root = client.get("/").json()
+    health = client.get("/healthz").json()
+
+    assert root["api"]["version"] == main.__version__
+    assert root["api"]["git_sha"] == "railway-sha"
+    assert health["api"]["version"] == main.__version__
+    assert health["api"]["git_sha"] == "railway-sha"

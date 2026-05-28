@@ -8,11 +8,35 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections import Counter
-from typing import Iterable, Optional
+from typing import Optional
+
+from .keyword_noise import (
+    partition_query_noise,
+    query_noise_meta,
+    query_stem_tokens,
+    tokenize_keywords,
+    tokenize_title_terms,
+)
+from .match_modes import (
+    MATCH_MODE_ALIAS_OR,
+    MATCH_MODE_PHRASE,
+    MATCH_MODE_TOKEN_AND,
+    MATCH_MODES,
+    query_alias_meta,
+    sanitize_fts,
+    sanitize_fts_alias_or,
+    sanitize_fts_phrase_in,
+    sanitize_fts_token_and,
+)
 
 EXCLUDED_STATUSES_DEFAULT = ("Withdraw", "Reject", "Withdrawn", "Rejected", "Desk Reject")
 _EXCLUDED_STATUSES_LOWER = tuple(s.lower() for s in EXCLUDED_STATUSES_DEFAULT)
+# Substring patterns catch venue-prefixed status strings that don't equal any
+# canonical value verbatim — e.g. "NeurIPS 2023 Conference Withdrawn Submission".
+# Each pattern is matched against LOWER(status) via SQL LIKE '%pattern%'.
+_EXCLUDED_STATUS_SUBSTRINGS = ("withdrawn submission",)
 MAX_ANALYSIS_MATCHES = 50_000
+MAX_SEARCH_MATCHES = 50_000
 MAX_AUTHOR_TRAJECTORY_MATCHES = 500
 
 
@@ -33,58 +57,18 @@ class TooManyMatchesError(ValueError):
         )
 
 
-# FTS5 input is treated as a single quoted phrase after tokenization.
-# This neutralizes the FTS5 query language entirely: operators like AND/OR/NOT/
-# NEAR, prefix-NOT (`-foo`), column filters (`title:`), and unbalanced quotes
-# can no longer fall through and either change semantics or raise
-# sqlite3.OperationalError.
-#
-# The precision trade-off is intentional for longitudinal analysis: a query like
-# "test time scaling" should not match any paper that happens to contain the
-# generic terms "test", "time", and "scaling" far apart in the abstract, because
-# that fabricates a historical trend for an emerging direction. Use `raw=True`
-# when the caller needs broader FTS5 syntax.
-_FTS_KEEP = re.compile(r"[^\w\s]+", flags=re.UNICODE)
+def _effective_match_mode(raw: bool, match_mode: str) -> str:
+    if raw:
+        return "raw"
+    if match_mode not in MATCH_MODES:
+        raise FTSQueryError(
+            f"unknown match_mode {match_mode!r}; allowed modes are "
+            f"{', '.join(MATCH_MODES)}"
+        )
+    return match_mode
 
 
-def _fts_tokens(q: str) -> list[str]:
-    """Split user text into FTS5-safe tokens. Drops punctuation; hyphens
-    become whitespace so `in-context` doesn't read as the NOT-operator."""
-    if not q:
-        return []
-    cleaned = _FTS_KEEP.sub(" ", q.replace("-", " "))
-    return [t for t in cleaned.split() if t]
-
-
-def sanitize_fts(q: str) -> str:
-    """Turn user text into a safe FTS5 expression.
-
-    Tokens are joined inside one double-quoted phrase so FTS5 operators
-    (AND/OR/NOT/NEAR, column filters, `-`-prefix-NOT, prefix `*`) and
-    unbalanced quotes can never fall through.
-
-    **Trade-off:** this is stricter than the previous token-AND default, and
-    documented FTS5 power features (`foo OR bar`,
-    `"exact phrase"`, `title:diffusion`, `reason*`) are NOT honored under
-    this default. Use `raw=True` on the endpoint to opt back in to full
-    FTS5 syntax (syntax errors then return HTTP 400).
-    """
-    tokens = _fts_tokens(q)
-    if not tokens:
-        return ""
-    return f'"{" ".join(tokens)}"'
-
-
-def sanitize_fts_phrase_in(column: str, q: str) -> str:
-    """Build an FTS5 column-scoped phrase: `column:"tok1 tok2"`. Used for
-    authors lookup where we want a single ordered phrase, not term-AND."""
-    tokens = _fts_tokens(q)
-    if not tokens:
-        return ""
-    return f'{column}:"{" ".join(tokens)}"'
-
-
-def _prepare_query(q: str, raw: bool) -> str:
+def _prepare_query(q: str, raw: bool, match_mode: str = MATCH_MODE_PHRASE) -> str:
     """Map user input to an FTS5 expression. With `raw=True` we trust the
     caller and let FTS5 parse the input as-is; the syntax-error → 400
     mapping in `_run_fts` still keeps malformed input from 500'ing."""
@@ -92,6 +76,10 @@ def _prepare_query(q: str, raw: bool) -> str:
         raw_query = (q or "").strip()
         _validate_raw_fts_columns(raw_query)
         return raw_query
+    if match_mode == MATCH_MODE_TOKEN_AND:
+        return sanitize_fts_token_and(q)
+    if match_mode == MATCH_MODE_ALIAS_OR:
+        return sanitize_fts_alias_or(q)
     return sanitize_fts(q)
 
 
@@ -235,7 +223,14 @@ def _exclude_rejected_filter(exclude: bool, *, alias: str = "p") -> tuple[str, l
         return "", []
     placeholders = ",".join("?" * len(_EXCLUDED_STATUSES_LOWER))
     col = f"{alias}.status" if alias else "status"
-    return f" AND ({col} IS NULL OR LOWER({col}) NOT IN ({placeholders}))", list(_EXCLUDED_STATUSES_LOWER)
+    in_clause = f"LOWER({col}) NOT IN ({placeholders})"
+    sub_clauses = [f"LOWER({col}) NOT LIKE ?" for _ in _EXCLUDED_STATUS_SUBSTRINGS]
+    sub_params = [f"%{p}%" for p in _EXCLUDED_STATUS_SUBSTRINGS]
+    all_clauses = [in_clause, *sub_clauses]
+    return (
+        f" AND ({col} IS NULL OR ({' AND '.join(all_clauses)}))",
+        list(_EXCLUDED_STATUSES_LOWER) + sub_params,
+    )
 
 
 def _row_to_card(row: dict, *, include_abstract: bool) -> dict:
@@ -273,6 +268,7 @@ def search_papers(
     order_by: str = "relevance",
     include_abstract: bool = False,
     raw: bool = False,
+    match_mode: str = MATCH_MODE_PHRASE,
 ) -> dict:
     """Full-text search across title/abstract/keywords/authors.
 
@@ -283,44 +279,81 @@ def search_papers(
     `foo OR bar`, `"exact phrase"`, `title:diffusion`, `reason*`. Malformed
     expressions raise FTSQueryError (HTTP 400 at the API layer).
     """
-    q_clean = _prepare_query(q, raw)
+    q_clean = _prepare_query(q, raw, match_mode)
+    effective_match_mode = _effective_match_mode(raw, match_mode)
+    alias_meta = query_alias_meta(q, raw, match_mode)
     if not q_clean:
         return {
             "total_matches": 0, "returned": 0, "offset": offset,
-            "limit": limit, "has_more": False, "total": 0, "results": [],
+            "limit": limit, "has_more": False, "total": 0,
+            "match_mode": effective_match_mode,
+            "query_expression": q_clean,
+            **alias_meta,
+            "results": [],
         }
 
     conf_sql, conf_params = _conf_filter(conferences)
     year_sql, year_params = _year_filter(year_from, year_to)
     excl_sql, excl_params = _exclude_rejected_filter(exclude_rejected)
+    count_sql = f"""
+        SELECT COUNT(*) AS n
+        FROM (
+            SELECT p.id
+            FROM papers_fts
+            JOIN papers p ON p.id = papers_fts.rowid
+            WHERE papers_fts MATCH ?
+              {conf_sql}{year_sql}{excl_sql}
+            LIMIT ?
+        )
+    """
+    total = _run_fts(
+        conn,
+        count_sql,
+        [q_clean, *conf_params, *year_params, *excl_params, MAX_SEARCH_MATCHES + 1],
+        raw=raw,
+    )[0]["n"]
+    if total > MAX_SEARCH_MATCHES:
+        raise TooManyMatchesError(
+            endpoint="search",
+            matches=total,
+            max_matches=MAX_SEARCH_MATCHES,
+        )
 
     order_sql = {
-        "relevance": "bm25(papers_fts)",
+        "relevance": "papers_fts.rank",
         "year_desc": "p.year DESC, bm25(papers_fts)",
         "citation_desc": "p.gs_citation DESC NULLS LAST, bm25(papers_fts)",
         "rating_desc": "p.rating_avg DESC NULLS LAST, bm25(papers_fts)",
-    }.get(order_by, "bm25(papers_fts)")
+    }.get(order_by, "papers_fts.rank")
 
-    sql = f"""
-        SELECT p.*
-        FROM papers_fts
-        JOIN papers p ON p.id = papers_fts.rowid
-        WHERE papers_fts MATCH ?
-          {conf_sql}{year_sql}{excl_sql}
-        ORDER BY {order_sql}
-        LIMIT ? OFFSET ?
-    """
+    if order_by == "relevance":
+        sql = f"""
+            WITH ranked AS (
+                SELECT p.id AS id, papers_fts.rank AS rank
+                FROM papers_fts
+                JOIN papers p ON p.id = papers_fts.rowid
+                WHERE papers_fts MATCH ?
+                  {conf_sql}{year_sql}{excl_sql}
+                ORDER BY rank
+                LIMIT ? OFFSET ?
+            )
+            SELECT p.*
+            FROM ranked
+            JOIN papers p ON p.id = ranked.id
+            ORDER BY ranked.rank
+        """
+    else:
+        sql = f"""
+            SELECT p.*
+            FROM papers_fts
+            JOIN papers p ON p.id = papers_fts.rowid
+            WHERE papers_fts MATCH ?
+              {conf_sql}{year_sql}{excl_sql}
+            ORDER BY {order_sql}
+            LIMIT ? OFFSET ?
+        """
     params = [q_clean, *conf_params, *year_params, *excl_params, limit, offset]
     rows = _run_fts(conn, sql, params, raw=raw)
-
-    count_sql = f"""
-        SELECT COUNT(*) AS n
-        FROM papers_fts
-        JOIN papers p ON p.id = papers_fts.rowid
-        WHERE papers_fts MATCH ?
-          {conf_sql}{year_sql}{excl_sql}
-    """
-    total = _run_fts(conn, count_sql, [q_clean, *conf_params, *year_params, *excl_params], raw=raw)[0]["n"]
 
     cards = [_row_to_card(r, include_abstract=include_abstract) for r in rows]
     return {
@@ -332,6 +365,9 @@ def search_papers(
         "has_more": (offset + len(cards)) < total,
         # Back-compat alias — keep one release, then remove.
         "total": total,
+        "match_mode": effective_match_mode,
+        "query_expression": q_clean,
+        **alias_meta,
         "results": cards,
     }
 
@@ -424,15 +460,24 @@ def topic_trend(
     year_to: Optional[int] = None,
     exclude_rejected: bool = True,
     raw: bool = False,
+    match_mode: str = MATCH_MODE_PHRASE,
 ) -> dict:
     """Yearly paper count + citation-weighted volume for a topic query.
 
     `raw=True` passes the query to FTS5 verbatim (full operator support);
     default sanitizes input into one quoted phrase.
     """
-    q_clean = _prepare_query(q, raw)
+    q_clean = _prepare_query(q, raw, match_mode)
+    effective_match_mode = _effective_match_mode(raw, match_mode)
+    alias_meta = query_alias_meta(q, raw, match_mode)
     if not q_clean:
-        return {"query": q, "series": []}
+        return {
+            "query": q,
+            "match_mode": effective_match_mode,
+            "query_expression": q_clean,
+            **alias_meta,
+            "series": [],
+        }
 
     conf_sql, conf_params = _conf_filter(conferences)
     year_sql, year_params = _year_filter(year_from, year_to)
@@ -462,38 +507,11 @@ def topic_trend(
         bucket["by_conf"][r["conf"]] = {"papers": r["papers"], "citations": r["citations"]}
     return {
         "query": q,
+        "match_mode": effective_match_mode,
+        "query_expression": q_clean,
+        **alias_meta,
         "series": [yearly[y] for y in sorted(yearly)],
     }
-
-
-# Stop-words to drop when extracting keyword/term drift.
-_STOPWORDS = set("""
-a an and are as at be by for from has have in is it its of on or such that the their then there these to was were will with we our you your this they them than but not no any all can may use using used new novel model models method methods learning deep neural network networks based approach paper task tasks
-""".split())
-
-
-def _tokenize_keywords(s: str) -> Iterable[str]:
-    if not s:
-        return []
-    # paperlists separates keywords with semicolons; fall back to splitting on commas/newlines.
-    parts = re.split(r"[;,\n]", s)
-    out = []
-    for p in parts:
-        kw = p.strip().lower()
-        if kw and kw not in _STOPWORDS and len(kw) > 1:
-            out.append(kw)
-    return out
-
-
-def _tokenize_title_terms(s: str) -> Iterable[str]:
-    """Fallback terms for rows whose source metadata lacks `keywords`."""
-    if not s:
-        return []
-    out = []
-    for tok in _fts_tokens(s.lower()):
-        if tok not in _STOPWORDS and len(tok) > 2:
-            out.append(tok)
-    return out
 
 
 def topic_evolution(
@@ -507,6 +525,7 @@ def topic_evolution(
     conferences: Optional[list[str]] = None,
     exclude_rejected: bool = True,
     raw: bool = False,
+    match_mode: str = MATCH_MODE_PHRASE,
 ) -> dict:
     """Per-year (or per-window) top co-occurring keywords and top venues.
 
@@ -516,9 +535,17 @@ def topic_evolution(
     `raw=True` enables full FTS5 syntax in the query (operators, prefix,
     column filters); default sanitizes input.
     """
-    q_clean = _prepare_query(q, raw)
+    q_clean = _prepare_query(q, raw, match_mode)
+    effective_match_mode = _effective_match_mode(raw, match_mode)
+    alias_meta = query_alias_meta(q, raw, match_mode)
     if not q_clean or year_from > year_to:
-        return {"query": q, "windows": []}
+        return {
+            "query": q,
+            "match_mode": effective_match_mode,
+            "query_expression": q_clean,
+            **alias_meta,
+            "windows": [],
+        }
 
     conf_sql, conf_params = _conf_filter(conferences)
     excl_sql, excl_params = _exclude_rejected_filter(exclude_rejected)
@@ -574,9 +601,9 @@ def topic_evolution(
         start = year_from + ((r["year"] - year_from) // window) * window
         bucket = buckets[start]
         bucket["n_papers"] += 1
-        terms = list(_tokenize_keywords(r["keywords"]))
+        terms = list(tokenize_keywords(r["keywords"]))
         if not terms:
-            terms = list(_tokenize_title_terms(r["title"]))
+            terms = list(tokenize_title_terms(r["title"]))
         for kw in terms:
             bucket["keywords"][kw] += 1
         if r["conf"]:
@@ -604,7 +631,10 @@ def topic_evolution(
         cite, rating, bonus = _row_features(row)
         return (bonus, rating, cite)
 
+    qstems = query_stem_tokens(q)
     windows = []
+    window_counters: list[Counter] = []
+    all_suppressed: list[tuple] = []
     for y in sorted(buckets):
         bucket = buckets[y]
         # Citation-only is unfair for the current year (papers <1 year old have
@@ -619,12 +649,20 @@ def topic_evolution(
             ranking_basis = "rating_avg+status_fallback"
             key_fn = _key_by_rating
         landmarks = sorted(bucket["candidates"], key=key_fn, reverse=True)[:5]
+        # Filter restatements of the user's query out of the top-keyword
+        # list — those are noise for "what drifted?" questions.
+        kw_filtered, kw_suppressed = partition_query_noise(
+            bucket["keywords"].most_common(), qstems
+        )
+        all_suppressed.extend(kw_suppressed)
+        window_counters.append(bucket["keywords"])
         windows.append({
             "year_from": bucket["year_from"],
             "year_to": bucket["year_to"],
             "n_papers": bucket["n_papers"],
             "ranking_basis": ranking_basis,
-            "top_keywords": bucket["keywords"].most_common(top_k),
+            "top_keywords": kw_filtered[:top_k],
+            "suppressed_query_keywords": kw_suppressed[:top_k],
             "top_venues": bucket["venues"].most_common(10),
             "landmark_papers": [
                 {
@@ -638,7 +676,48 @@ def topic_evolution(
             ],
         })
 
-    return {"query": q, "window": window, "total_matches": total_matches, "windows": windows}
+    # First-vs-last keyword diff so callers get the longitudinal headline
+    # (PR #29's "emerged keyword: reinforcement learning 7 → 100") without
+    # having to diff window dicts client-side.
+    keyword_drift: dict = {"emerged": [], "faded": [], "grew": []}
+    keyword_drift_suppressed: dict = {"emerged": [], "faded": [], "grew": []}
+    if len(window_counters) >= 2:
+        first, last = window_counters[0], window_counters[-1]
+        emerged_raw = [
+            (k, last[k]) for k, _ in last.most_common()
+            if k not in first
+        ]
+        faded_raw = [
+            (k, first[k]) for k, _ in first.most_common()
+            if k not in last
+        ]
+        grew_raw = [
+            (k, first[k], last[k])
+            for k, _ in last.most_common()
+            if k in first and last[k] > first[k] * 2 and last[k] >= 5
+        ]
+        emerged, emerged_suppressed = partition_query_noise(emerged_raw, qstems)
+        faded, faded_suppressed = partition_query_noise(faded_raw, qstems)
+        grew, grew_suppressed = partition_query_noise(grew_raw, qstems)
+        keyword_drift = {"emerged": emerged, "faded": faded, "grew": grew}
+        keyword_drift_suppressed = {
+            "emerged": emerged_suppressed[:top_k],
+            "faded": faded_suppressed[:top_k],
+            "grew": grew_suppressed[:top_k],
+        }
+
+    return {
+        "query": q,
+        "match_mode": effective_match_mode,
+        "query_expression": q_clean,
+        **alias_meta,
+        **query_noise_meta(qstems, all_suppressed),
+        "window": window,
+        "total_matches": total_matches,
+        "windows": windows,
+        "keyword_drift": {k: v[:top_k] for k, v in keyword_drift.items()},
+        "keyword_drift_suppressed_query_terms": keyword_drift_suppressed,
+    }
 
 
 def author_trajectory(
@@ -687,14 +766,28 @@ def author_trajectory(
         params,
     )
 
+    needle = name.lower().strip()
     by_year: dict[int, list] = {}
     for r in rows:
         # Confirm name actually appears (case-insensitive) — FTS porter stemming can over-match.
-        if name.lower() not in (r["authors"] or "").lower():
+        author_field = r["authors"] or ""
+        if needle not in author_field.lower():
             continue
+        # Expose where the queried author sits in the byline so callers can
+        # de-emphasize 13-of-26-coauthor noise on senior researchers'
+        # student-led papers without re-parsing the string client-side.
+        author_list = [a.strip() for a in re.split(r"[;,]", author_field) if a.strip()]
+        n_authors = len(author_list)
+        author_position: Optional[int] = None
+        for idx, a in enumerate(author_list):
+            if needle in a.lower():
+                author_position = idx + 1  # 1-indexed for human-readable JSON
+                break
         by_year.setdefault(r["year"], []).append({
             "conf": r["conf"], "paper_id": r["paper_id"], "title": r["title"],
-            "authors": r["authors"], "gs_citation": r["gs_citation"], "status": r["status"],
+            "authors": author_field, "gs_citation": r["gs_citation"], "status": r["status"],
+            "author_position": author_position,
+            "n_authors": n_authors,
         })
 
     return {
@@ -716,14 +809,23 @@ def field_landscape(
     conferences: Optional[list[str]] = None,
     exclude_rejected: bool = True,
     raw: bool = False,
+    match_mode: str = MATCH_MODE_PHRASE,
 ) -> dict:
     """Single-year snapshot for a field: top papers, top authors, top affiliations,
     top keywords. Useful for 'state of <field> in <year>' summaries.
 
     `raw=True` enables full FTS5 syntax."""
-    q_clean = _prepare_query(q, raw)
+    q_clean = _prepare_query(q, raw, match_mode)
+    effective_match_mode = _effective_match_mode(raw, match_mode)
+    alias_meta = query_alias_meta(q, raw, match_mode)
     if not q_clean:
-        return {"query": q, "year": year}
+        return {
+            "query": q,
+            "year": year,
+            "match_mode": effective_match_mode,
+            "query_expression": q_clean,
+            **alias_meta,
+        }
 
     conf_sql, conf_params = _conf_filter(conferences)
     excl_sql, excl_params = _exclude_rejected_filter(exclude_rejected)
@@ -765,7 +867,10 @@ def field_landscape(
             af = af.strip()
             if af:
                 aff_counter[af] += 1
-        for kw in _tokenize_keywords(r["keywords"]):
+        terms = list(tokenize_keywords(r["keywords"]))
+        if not terms:
+            terms = list(tokenize_title_terms(r["title"]))
+        for kw in terms:
             kw_counter[kw] += 1
         if r["conf"]:
             venue_counter[r["conf"]] += 1
@@ -773,9 +878,17 @@ def field_landscape(
     top_papers = sorted(
         rows, key=lambda r: (r["gs_citation"] or 0, r["rating_avg"] or 0), reverse=True
     )[:top_k]
+    qstems = query_stem_tokens(q)
+    top_keywords, suppressed_keywords = partition_query_noise(
+        kw_counter.most_common(), qstems
+    )
 
     return {
         "query": q,
+        "match_mode": effective_match_mode,
+        "query_expression": q_clean,
+        **alias_meta,
+        **query_noise_meta(qstems, suppressed_keywords),
         "year": year,
         "n_papers": len(rows),
         "top_papers": [
@@ -786,7 +899,8 @@ def field_landscape(
         ],
         "top_authors": author_counter.most_common(top_k),
         "top_affiliations": aff_counter.most_common(top_k),
-        "top_keywords": kw_counter.most_common(top_k),
+        "top_keywords": top_keywords[:top_k],
+        "suppressed_query_keywords": suppressed_keywords[:top_k],
         "venue_distribution": venue_counter.most_common(),
     }
 
@@ -801,6 +915,7 @@ def compare_periods(
     conferences: Optional[list[str]] = None,
     exclude_rejected: bool = True,
     raw: bool = False,
+    match_mode: str = MATCH_MODE_PHRASE,
 ) -> dict:
     """Diff a topic between two year ranges. Returns keywords/authors/affiliations
     that emerged, disappeared, or stayed across the two periods.
@@ -816,14 +931,20 @@ def compare_periods(
             "n_papers": n,
         }
 
-    q_clean = _prepare_query(q, raw)
+    q_clean = _prepare_query(q, raw, match_mode)
+    effective_match_mode = _effective_match_mode(raw, match_mode)
+    alias_meta = query_alias_meta(q, raw, match_mode)
     if not q_clean:
         empty = {"emerged": [], "faded": [], "sustained": []}
         return {
             "query": q,
+            "match_mode": effective_match_mode,
+            "query_expression": q_clean,
+            **alias_meta,
             "period_a": _period_meta(period_a, 0),
             "period_b": _period_meta(period_b, 0),
             "keyword_diff": empty,
+            "keyword_diff_suppressed_query_terms": empty,
             "author_diff": empty,
             "affiliation_diff": empty,
             "venue_diff": empty,
@@ -850,7 +971,7 @@ def compare_periods(
     rows = _run_fts(
         conn,
         f"""
-        SELECT p.authors, p.affiliations, p.keywords, p.conf, p.year
+        SELECT p.authors, p.affiliations, p.keywords, p.title, p.conf, p.year
         {from_where_sql}
         """,
         params,
@@ -879,7 +1000,10 @@ def compare_periods(
             aff = aff.strip()
             if aff:
                 bucket["affiliations"][aff] += 1
-        for kw in _tokenize_keywords(r["keywords"]):
+        terms = list(tokenize_keywords(r["keywords"]))
+        if not terms:
+            terms = list(tokenize_title_terms(r["title"]))
+        for kw in terms:
             bucket["keywords"][kw] += 1
         if r["conf"]:
             bucket["venues"][r["conf"]] += 1
@@ -890,28 +1014,65 @@ def compare_periods(
         if period_b[0] <= r["year"] <= period_b[1]:
             _add(b, r)
 
-    def _diff(ca: Counter, cb: Counter, k: int):
+    qstems = query_stem_tokens(q)
+
+    def _diff(ca: Counter, cb: Counter, k: int, *, drop_query_noise: bool):
         emerged = [(x, cb[x]) for x in cb if x not in ca]
         emerged.sort(key=lambda t: t[1], reverse=True)
         faded = [(x, ca[x]) for x in ca if x not in cb]
         faded.sort(key=lambda t: t[1], reverse=True)
         sustained = [(x, ca[x], cb[x]) for x in ca if x in cb]
         sustained.sort(key=lambda t: t[1] + t[2], reverse=True)
-        return {
+        suppressed = {"emerged": [], "faded": [], "sustained": []}
+        if drop_query_noise:
+            emerged, suppressed_emerged = partition_query_noise(emerged, qstems)
+            faded, suppressed_faded = partition_query_noise(faded, qstems)
+            sustained, suppressed_sustained = partition_query_noise(sustained, qstems)
+            suppressed = {
+                "emerged": suppressed_emerged[:k],
+                "faded": suppressed_faded[:k],
+                "sustained": suppressed_sustained[:k],
+            }
+        result = {
             "emerged": emerged[:k],
             "faded": faded[:k],
             "sustained": sustained[:k],
         }
+        return result, suppressed
+
+    keyword_diff, keyword_diff_suppressed = _diff(
+        a["keywords"], b["keywords"], top_k, drop_query_noise=True
+    )
+    author_diff, _ = _diff(a["authors"], b["authors"], top_k, drop_query_noise=False)
+    affiliation_diff, _ = _diff(
+        a["affiliations"], b["affiliations"], top_k, drop_query_noise=False
+    )
+    venue_diff, _ = _diff(a["venues"], b["venues"], top_k, drop_query_noise=False)
 
     return {
         "query": q,
+        "match_mode": effective_match_mode,
+        "query_expression": q_clean,
+        **alias_meta,
+        **query_noise_meta(
+            qstems,
+            [
+                *keyword_diff_suppressed["emerged"],
+                *keyword_diff_suppressed["faded"],
+                *keyword_diff_suppressed["sustained"],
+            ],
+        ),
         "total_matches": total_matches,
         "period_a": _period_meta(period_a, a["n_papers"]),
         "period_b": _period_meta(period_b, b["n_papers"]),
-        "keyword_diff": _diff(a["keywords"], b["keywords"], top_k),
-        "author_diff": _diff(a["authors"], b["authors"], top_k),
-        "affiliation_diff": _diff(a["affiliations"], b["affiliations"], top_k),
-        "venue_diff": _diff(a["venues"], b["venues"], top_k),
+        # Only the keyword diff is filtered for query restatements — author /
+        # affiliation / venue diffs intentionally aren't, since "Meta FAIR
+        # emerged" is a real signal even if the query mentions Meta.
+        "keyword_diff": keyword_diff,
+        "keyword_diff_suppressed_query_terms": keyword_diff_suppressed,
+        "author_diff": author_diff,
+        "affiliation_diff": affiliation_diff,
+        "venue_diff": venue_diff,
     }
 
 

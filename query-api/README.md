@@ -40,8 +40,17 @@ Then `open http://localhost:8000/docs` for the interactive API browser.
 
 By default, free-text queries are tokenized into one safe FTS5 phrase. This is
 stricter than token-AND matching, but it avoids fabricating historical trends
-for emerging multi-word topics such as "test time scaling". Set `raw=true`
-when you intentionally need FTS5 operators or broader boolean matching.
+for emerging multi-word topics such as "test time scaling". Use
+`match_mode=token_and` as an explicit sensitivity check when you need broader
+recall, use `match_mode=alias_or` when you need known acronym/name variants
+(`RAG` ↔ `retrieval augmented generation`, `LLM` ↔ `large language model`),
+and set `raw=true` only when you intentionally need full FTS5 syntax. Responses
+echo `match_mode`, `query_expression`, and alias/filter metadata so agents can
+explain which matching contract produced a trend.
+
+To protect small Railway deployments, `/v1/search` rejects overly broad queries
+with `too_many_matches`; narrow by phrase, year, venue, or `match_mode=alias_or`
+instead of generic one-word searches.
 
 For Skill verification, use the same API through the bundled client:
 

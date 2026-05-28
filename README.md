@@ -30,8 +30,13 @@ Use the hosted demo only for evaluation:
 ```bash
 export PAPERLISTS_API_URL=https://api-production-18d3.up.railway.app
 python3 skill/scripts/paperlists.py coverage
-python3 skill/scripts/paperlists.py topic_evolution q="LLM reasoning" year_from=2024 year_to=2025 conferences=iclr,nips,icml,acl,emnlp
+python3 skill/scripts/paperlists.py corpus_manifest  # confirm api.version/build identity
+python3 skill/scripts/paperlists.py topic_evolution q="LLM reasoning" year_from=2024 year_to=2025 conferences=iclr,nips,icml,acl,emnlp match_mode=token_and
 ```
+
+For longitudinal claims, require `corpus_manifest.api.version >= 0.2.0` (or a
+known deploy git SHA). Older demos used token-AND query semantics without
+`match_mode`, `query_expression`, `venue_diff`, or query-noise metadata.
 
 For a local API:
 

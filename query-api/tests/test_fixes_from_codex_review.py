@@ -325,17 +325,21 @@ def test_default_multiword_query_is_phrase_not_token_and(tmp_path: Path) -> None
         default = queries.topic_trend(
             conn, q="test time scaling", year_from=2022, year_to=2025
         )
+        assert default["match_mode"] == "phrase"
+        assert default["query_expression"] == '"test time scaling"'
         assert [(row["year"], row["papers"]) for row in default["series"]] == [
             (2025, 1)
         ]
 
         token_and = queries.topic_trend(
             conn,
-            q='"test" "time" "scaling"',
+            q="test time scaling",
             year_from=2022,
             year_to=2025,
-            raw=True,
+            match_mode="token_and",
         )
+        assert token_and["match_mode"] == "token_and"
+        assert token_and["query_expression"] == '"test" "time" "scaling"'
         assert [(row["year"], row["papers"]) for row in token_and["series"]] == [
             (2022, 1),
             (2025, 1),
@@ -525,6 +529,8 @@ def test_ratelimit_db_state_shared_across_invocations(tmp_path: Path) -> None:
         os.environ.pop("PAPERLISTS_RATELIMIT_DB", None)
         os.environ.pop("PAPERLISTS_RATE_PER_MIN", None)
         os.environ.pop("PAPERLISTS_RATE_BURST", None)
+        importlib.reload(rl)
+        rl.reset_for_tests()
 
 
 def test_top_papers_excludes_rejected_by_default(tmp_path: Path) -> None:

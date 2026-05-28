@@ -95,6 +95,7 @@ def search_papers(
     order_by: str = "relevance",
     include_abstract: bool = False,
     raw: bool = False,
+    match_mode: str = "phrase",
 ) -> dict:
     """Full-text search over title / abstract / keywords / authors.
 
@@ -117,6 +118,10 @@ def search_papers(
             cost ~1KB per result.
         raw: Enable full FTS5 syntax. Malformed expressions return HTTP 400
             (surfaced as `{error: "invalid_query"}` in the result).
+        match_mode: "phrase" (default, high precision), "token_and"
+            (broader sensitivity check), or "alias_or" (known acronym/name
+            aliases such as RAG OR retrieval augmented generation). Ignored
+            when `raw=True`.
 
     Returns a dict with `total_matches`, `returned`, `offset`, `limit`,
     `has_more`, and `results`. Use `has_more` to paginate.
@@ -128,7 +133,7 @@ def search_papers(
         exclude_rejected=exclude_rejected,
         limit=limit, offset=offset, order_by=order_by,
         include_abstract=include_abstract,
-        raw=raw,
+        raw=raw, match_mode=match_mode,
     )
 
 
@@ -151,6 +156,7 @@ def topic_trend(
     year_to: Optional[int] = None,
     exclude_rejected: bool = True,
     raw: bool = False,
+    match_mode: str = "phrase",
 ) -> dict:
     """Yearly publication volume + citation-weighted volume for a topic.
 
@@ -158,14 +164,17 @@ def topic_trend(
     Returns a `series` of `{year, papers, citations, by_conf}` records.
 
     Example queries: "diffusion model", "retrieval augmented generation",
-    "mixture of experts", "constitutional AI". Set `raw=True` for FTS5
-    operator support.
+    "mixture of experts", "constitutional AI". Default `match_mode="phrase"`
+    favors precision; set `match_mode="token_and"` for a broader sensitivity
+    check, `match_mode="alias_or"` for known acronym/name aliases, or
+    `raw=True` for full FTS5 operator support.
     """
     return _get(
         "/v1/topic_trend",
         q=query, conferences=conferences,
         year_from=year_from, year_to=year_to,
         exclude_rejected=exclude_rejected, raw=raw,
+        match_mode=match_mode,
     )
 
 
@@ -179,6 +188,7 @@ def topic_evolution(
     conferences: Optional[str] = None,
     exclude_rejected: bool = True,
     raw: bool = False,
+    match_mode: str = "phrase",
 ) -> dict:
     """Track how a research area evolves: per-window top co-occurring keywords,
     top venues, and landmark papers.
@@ -188,6 +198,13 @@ def topic_evolution(
     `topic_evolution("retrieval augmented generation", 2020, 2024, window=1)`
     will show RAG morphing from dense-passage-retrieval era into LLM-coupled
     pipelines.
+
+    Prefer the response-level `keyword_drift.grew/emerged/faded` fields for
+    the longitudinal headline; they compare the first and last window after
+    suppressing terms that merely restate the query. Inspect
+    `suppressed_query_keywords` and `keyword_drift_suppressed_query_terms` when
+    you need to explain filtered self-echo terms such as "llm" or
+    "large language model".
 
     Each window includes a `ranking_basis` field — `"gs_citation"` when
     citations are meaningful, `"rating_avg+status_fallback"` for the current
@@ -200,12 +217,15 @@ def topic_evolution(
         top_k: keywords/venues per window.
         exclude_rejected: Drop Reject/Withdraw entries (recommended).
         raw: Enable full FTS5 syntax in the query.
+        match_mode: "phrase" (default), "token_and" for broad sensitivity
+            checks, or "alias_or" for known acronym/name aliases.
     """
     return _get(
         "/v1/topic_evolution",
         q=query, year_from=year_from, year_to=year_to,
         window=window, top_k=top_k, conferences=conferences,
         exclude_rejected=exclude_rejected, raw=raw,
+        match_mode=match_mode,
     )
 
 
@@ -220,6 +240,7 @@ def compare_periods(
     conferences: Optional[str] = None,
     exclude_rejected: bool = True,
     raw: bool = False,
+    match_mode: str = "phrase",
 ) -> dict:
     """Diff a topic between two year ranges. Returns three buckets per
     dimension (keywords, authors, affiliations, venues):
@@ -233,7 +254,9 @@ def compare_periods(
     refute that shift directly.
 
     Each period in the response exposes both `years: [a, b]` and flat
-    `year_from`/`year_to` fields. Set `raw=True` for FTS5 operator support.
+    `year_from`/`year_to` fields. Use `match_mode="token_and"` for a broader
+    sensitivity check, `match_mode="alias_or"` for known acronym/name aliases,
+    or `raw=True` for FTS5 operator support.
     """
     return _get(
         "/v1/compare_periods",
@@ -243,6 +266,7 @@ def compare_periods(
         top_k=top_k,
         conferences=conferences,
         exclude_rejected=exclude_rejected, raw=raw,
+        match_mode=match_mode,
     )
 
 
@@ -260,7 +284,9 @@ def author_trajectory(
 
     `exclude_rejected` defaults to True so withdrawn/rejected OpenReview
     submissions do not dominate "what are they working on now" summaries.
-    Narrow common names with full names, years, and venues.
+    Each paper includes `author_position` and `n_authors`; use those fields to
+    distinguish first/lead-author work from senior-author tail papers. Narrow
+    common names with full names, years, and venues.
     """
     return _get(
         "/v1/author_trajectory",
@@ -278,17 +304,21 @@ def field_landscape(
     conferences: Optional[str] = None,
     exclude_rejected: bool = True,
     raw: bool = False,
+    match_mode: str = "phrase",
 ) -> dict:
     """Snapshot a research field in a specific year: top papers (by citation),
     top authors, top affiliations, top keywords, venue distribution.
 
     Use for "state of <field> in <year>" summaries or to identify the dominant
-    labs in a subfield at a point in time. `raw=True` enables FTS5 operators.
+    labs in a subfield at a point in time. Use `match_mode="token_and"` for a
+    broader sensitivity check, `match_mode="alias_or"` for known acronym/name
+    aliases, or `raw=True` for FTS5 operators.
     """
     return _get(
         "/v1/field_landscape",
         q=query, year=year, top_k=top_k,
         conferences=conferences, exclude_rejected=exclude_rejected, raw=raw,
+        match_mode=match_mode,
     )
 
 

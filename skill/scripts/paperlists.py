@@ -11,6 +11,8 @@ Examples:
     paperlists.py coverage
     paperlists.py corpus_manifest
     paperlists.py search q="diffusion model" year_from=2022 limit=10
+    paperlists.py search q="test time scaling" match_mode=token_and year_from=2022
+    paperlists.py search q="RAG" match_mode=alias_or year_from=2020
     paperlists.py search q='title:diffusion AND NOT survey' raw=true limit=10
     paperlists.py topic_trend q="rlhf" year_from=2020 year_to=2025
     paperlists.py topic_evolution q="retrieval augmented" year_from=2020 year_to=2025 window=1 conferences=iclr,nips,icml
@@ -22,9 +24,11 @@ Examples:
     paperlists.py top_papers conf=nips year=2023 by=gs_citation top_k=10
 
 Notes on `q=` queries:
-    By default, input is treated as one safe phrase. To use FTS5 operators
-    (`OR`, `NEAR`, prefix `*`, column filters like `title:foo`, exact
-    phrases), append `raw=true`. Bad raw queries return HTTP 400 with
+    By default, input is treated as one safe phrase. Use
+    match_mode=token_and for a broader sensitivity check, or
+    match_mode=alias_or for known acronym/name aliases. To use FTS5 operators
+    (`OR`, `NEAR`, prefix `*`, column filters like `title:foo`, exact phrases),
+    append raw=true. Bad raw queries return HTTP 400 with
     {"error":"invalid_query"}.
 
 Env: PAPERLISTS_API_URL (required; demo https://api-production-18d3.up.railway.app)

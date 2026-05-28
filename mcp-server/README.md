@@ -64,6 +64,21 @@ Same `command` + `args`. Cursor reads `~/.cursor/mcp.json`; Codex reads `~/.code
 Use `exclude_rejected=false` only for raw corpus diagnostics. Topic tools also
 accept comma-separated `conferences` filters such as `iclr,nips,icml`.
 
+Query tools default to `match_mode="phrase"` for high-precision longitudinal
+claims. Use `match_mode="token_and"` as a broad sensitivity check, and
+`match_mode="alias_or"` for acronym/name drift such as `RAG` ↔ `retrieval
+augmented generation` or `RLHF` ↔ `reinforcement learning from human feedback`.
+Responses echo `match_mode`, `query_expression`, and alias metadata.
+
+For `topic_evolution`, prefer `keyword_drift.grew/emerged/faded` for the
+headline summary, then cite per-window `top_keywords` as supporting detail.
+`topic_evolution`, `compare_periods`, and `field_landscape` suppress keyword
+variants that merely restate the query; inspect `query_noise_filter`,
+`suppressed_query_keywords`, and `keyword_diff_suppressed_query_terms` when you
+need to explain what was filtered. `author_trajectory` entries include
+`author_position` and `n_authors` so callers can distinguish lead-author work
+from senior-author tail papers.
+
 ## Running against a local index
 
 If you have the paperlists repo cloned and want to avoid the hosted API entirely (offline use, very large queries, custom modifications):
