@@ -146,7 +146,7 @@ top venues (emnlp → iclr/nips), and landmark cited papers each year.
 
 ### Pattern 2 — Topic drift between two eras
 ```bash
-scripts/paperlists.py compare_periods q="vision transformer" period_a_from=2018 period_a_to=2020 period_b_from=2022 period_b_to=2024 conferences=iclr,nips,icml
+scripts/paperlists.py compare_periods q="vision transformer" period_a_from=2018 period_a_to=2020 period_b_from=2022 period_b_to=2024 conferences=iclr,nips,icml match_mode=token_and
 ```
 Returns `emerged` / `faded` / `sustained` for keywords, authors, and
 affiliations. Great for "what's new" or "what's been abandoned" narratives.

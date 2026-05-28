@@ -170,7 +170,7 @@ def _run_fts(
 
 def _enforce_analysis_match_cap(
     conn: sqlite3.Connection,
-    count_sql: str,
+    from_where_sql: str,
     params: list,
     *,
     raw: bool,
@@ -187,7 +187,15 @@ def _enforce_analysis_match_cap(
     """
     if max_matches is None:
         max_matches = MAX_ANALYSIS_MATCHES
-    rows = _run_fts(conn, count_sql, params, raw=raw)
+    count_sql = f"""
+        SELECT COUNT(*) AS n
+        FROM (
+            SELECT p.id
+            {from_where_sql}
+            LIMIT ?
+        )
+    """
+    rows = _run_fts(conn, count_sql, [*params, max_matches + 1], raw=raw)
     matches = int(rows[0]["n"]) if rows else 0
     if matches > max_matches:
         raise TooManyMatchesError(
@@ -559,7 +567,7 @@ def topic_evolution(
     params = [q_clean, year_from, year_to, *conf_params, *excl_params]
     total_matches = _enforce_analysis_match_cap(
         conn,
-        f"SELECT COUNT(*) AS n {from_where_sql}",
+        from_where_sql,
         params,
         raw=raw,
         endpoint="topic_evolution",
@@ -750,7 +758,7 @@ def author_trajectory(
     params = [q_phrase, *conf_params, *year_params, *excl_params]
     _enforce_analysis_match_cap(
         conn,
-        f"SELECT COUNT(*) AS n {from_where_sql}",
+        from_where_sql,
         params,
         raw=False,
         endpoint="author_trajectory",
@@ -838,7 +846,7 @@ def field_landscape(
     params = [q_clean, year, *conf_params, *excl_params]
     _enforce_analysis_match_cap(
         conn,
-        f"SELECT COUNT(*) AS n {from_where_sql}",
+        from_where_sql,
         params,
         raw=raw,
         endpoint="field_landscape",
@@ -963,7 +971,7 @@ def compare_periods(
     params = [q_clean, lo, hi, *conf_params, *excl_params]
     total_matches = _enforce_analysis_match_cap(
         conn,
-        f"SELECT COUNT(*) AS n {from_where_sql}",
+        from_where_sql,
         params,
         raw=raw,
         endpoint="compare_periods",

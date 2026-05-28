@@ -34,9 +34,11 @@ python3 skill/scripts/paperlists.py corpus_manifest  # confirm api.version/build
 python3 skill/scripts/paperlists.py topic_evolution q="LLM reasoning" year_from=2024 year_to=2025 conferences=iclr,nips,icml,acl,emnlp match_mode=token_and
 ```
 
-For longitudinal claims, require `corpus_manifest.api.version >= 0.2.0` (or a
-known deploy git SHA). Older demos used token-AND query semantics without
-`match_mode`, `query_expression`, `venue_diff`, or query-noise metadata.
+For longitudinal claims, require `corpus_manifest.api.version >= 0.2.0`. For
+deployment canaries that must prove the endpoint is current HEAD, require a
+known `corpus_manifest.api.git_sha`; version alone only rejects pre-0.2 demos.
+Older demos used token-AND query semantics without `match_mode`,
+`query_expression`, `venue_diff`, or query-noise metadata.
 
 For a local API:
 
@@ -67,6 +69,10 @@ Runtime knobs:
 - `PAPERLISTS_RATE_BURST=20`
 - `PAPERLISTS_TRUST_PROXY=auto`
 - `PAPERLISTS_DB=/app/papers.db`
+- `PAPERLISTS_GIT_SHA`, `PAPERLISTS_GIT_BRANCH`, `PAPERLISTS_DEPLOYMENT_ID`,
+  `PAPERLISTS_ENVIRONMENT` are exposed in `/`, `/healthz`, and
+  `/v1/corpus_manifest`; the Dockerfile maps Railway's Git build args into
+  these fields when Railway provides them.
 
 ## Development
 

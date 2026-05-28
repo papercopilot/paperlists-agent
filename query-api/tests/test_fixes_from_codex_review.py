@@ -600,3 +600,34 @@ def test_broad_analysis_queries_raise_too_many_matches(tmp_path: Path, monkeypat
         with pytest.raises(queries.TooManyMatchesError) as landscape_err:
             queries.field_landscape(conn, q="learning", year=2025)
         assert landscape_err.value.endpoint == "field_landscape"
+
+
+def test_analysis_match_cap_uses_bounded_count(monkeypatch) -> None:
+    captured = {}
+
+    def fake_run_fts(conn, sql, params, *, raw=False):
+        captured["sql"] = sql
+        captured["params"] = params
+        captured["raw"] = raw
+        return [{"n": 3}]
+
+    monkeypatch.setattr(queries, "_run_fts", fake_run_fts)
+
+    with pytest.raises(queries.TooManyMatchesError) as err:
+        queries._enforce_analysis_match_cap(
+            None,
+            """
+            FROM papers_fts
+            JOIN papers p ON p.id = papers_fts.rowid
+            WHERE papers_fts MATCH ?
+            """,
+            ["model"],
+            raw=False,
+            endpoint="topic_evolution",
+            max_matches=2,
+        )
+
+    assert "LIMIT ?" in captured["sql"]
+    assert captured["params"] == ["model", 3]
+    assert captured["raw"] is False
+    assert err.value.matches == 3
