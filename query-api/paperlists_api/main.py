@@ -25,6 +25,13 @@ DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 MAX_OFFSET = 10_000
 _MATCH_MODE_PATTERN = f"^({'|'.join(queries.MATCH_MODES)})$"
+_BUILD_IDENTITY_HEADERS = (
+    "X-Paperlists-API-Version",
+    "X-Paperlists-Git-SHA",
+    "X-Paperlists-Git-Branch",
+    "X-Paperlists-Deployment-ID",
+    "X-Paperlists-Environment",
+)
 
 
 def _first_env(*names: str) -> Optional[str]:
@@ -62,6 +69,20 @@ def _build_info() -> dict:
         ),
     }
 
+
+def _attach_build_headers(response):
+    build = _build_info()
+    response.headers["X-Paperlists-API-Version"] = build["version"]
+    for key, header in (
+        ("git_sha", "X-Paperlists-Git-SHA"),
+        ("git_branch", "X-Paperlists-Git-Branch"),
+        ("deployment_id", "X-Paperlists-Deployment-ID"),
+        ("environment", "X-Paperlists-Environment"),
+    ):
+        if build.get(key):
+            response.headers[header] = build[key]
+    return response
+
 app = FastAPI(
     title=API_TITLE,
     version=__version__,
@@ -78,6 +99,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["GET"],
     allow_headers=["*"],
+    expose_headers=list(_BUILD_IDENTITY_HEADERS),
 )
 
 
@@ -175,16 +197,16 @@ def _validate_year_range(start: Optional[int], end: Optional[int], label: str) -
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
     if request.url.path in ("/", "/healthz", "/v1/coverage", "/v1/corpus_manifest"):
-        return await call_next(request)
+        return _attach_build_headers(await call_next(request))
     ip = _client_ip(request)
     allowed, retry = ratelimit.check_and_consume(ip)
     if not allowed:
-        return JSONResponse(
+        return _attach_build_headers(JSONResponse(
             {"error": "rate_limited", "retry_after_sec": retry},
             status_code=429,
             headers={"Retry-After": str(retry)},
-        )
-    return await call_next(request)
+        ))
+    return _attach_build_headers(await call_next(request))
 
 
 # ---------- Routes ----------

@@ -124,10 +124,21 @@ def test_root_and_healthz_expose_api_identity(monkeypatch) -> None:
     monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "railway-sha")
     client = TestClient(main.app)
 
-    root = client.get("/").json()
-    health = client.get("/healthz").json()
+    root_resp = client.get("/")
+    health_resp = client.get("/healthz")
+    invalid_resp = client.get(
+        "/v1/topic_evolution",
+        params={"q": "reasoning", "year_from": 2025, "year_to": 2024},
+    )
+    root = root_resp.json()
+    health = health_resp.json()
 
     assert root["api"]["version"] == main.__version__
     assert root["api"]["git_sha"] == "railway-sha"
     assert health["api"]["version"] == main.__version__
     assert health["api"]["git_sha"] == "railway-sha"
+    assert root_resp.headers["x-paperlists-api-version"] == main.__version__
+    assert root_resp.headers["x-paperlists-git-sha"] == "railway-sha"
+    assert health_resp.headers["x-paperlists-git-sha"] == "railway-sha"
+    assert invalid_resp.status_code == 400
+    assert invalid_resp.headers["x-paperlists-git-sha"] == "railway-sha"
