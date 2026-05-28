@@ -13,6 +13,7 @@ from typing import Iterable, Optional
 EXCLUDED_STATUSES_DEFAULT = ("Withdraw", "Reject", "Withdrawn", "Rejected", "Desk Reject")
 _EXCLUDED_STATUSES_LOWER = tuple(s.lower() for s in EXCLUDED_STATUSES_DEFAULT)
 MAX_ANALYSIS_MATCHES = 50_000
+MAX_AUTHOR_TRAJECTORY_MATCHES = 500
 
 
 class FTSQueryError(ValueError):
@@ -32,13 +33,17 @@ class TooManyMatchesError(ValueError):
         )
 
 
-# FTS5 input is treated as a *quoted phrase per token*, then AND-joined.
+# FTS5 input is treated as a single quoted phrase after tokenization.
 # This neutralizes the FTS5 query language entirely: operators like AND/OR/NOT/
 # NEAR, prefix-NOT (`-foo`), column filters (`title:`), and unbalanced quotes
 # can no longer fall through and either change semantics or raise
-# sqlite3.OperationalError. The trade-off is that users lose FTS5 syntax —
-# acceptable for an agent-facing API where "search for these terms" is the
-# overwhelming dominant case.
+# sqlite3.OperationalError.
+#
+# The precision trade-off is intentional for longitudinal analysis: a query like
+# "test time scaling" should not match any paper that happens to contain the
+# generic terms "test", "time", and "scaling" far apart in the abstract, because
+# that fabricates a historical trend for an emerging direction. Use `raw=True`
+# when the caller needs broader FTS5 syntax.
 _FTS_KEEP = re.compile(r"[^\w\s]+", flags=re.UNICODE)
 
 
@@ -54,16 +59,20 @@ def _fts_tokens(q: str) -> list[str]:
 def sanitize_fts(q: str) -> str:
     """Turn user text into a safe FTS5 expression.
 
-    Each token is wrapped in double quotes so FTS5 operators (AND/OR/NOT/NEAR,
-    column filters, `-`-prefix-NOT, prefix `*`) and unbalanced quotes can
-    never fall through. Tokens are joined by whitespace (FTS5 implicit AND).
+    Tokens are joined inside one double-quoted phrase so FTS5 operators
+    (AND/OR/NOT/NEAR, column filters, `-`-prefix-NOT, prefix `*`) and
+    unbalanced quotes can never fall through.
 
-    **Trade-off:** documented FTS5 power features (`foo OR bar`,
+    **Trade-off:** this is stricter than the previous token-AND default, and
+    documented FTS5 power features (`foo OR bar`,
     `"exact phrase"`, `title:diffusion`, `reason*`) are NOT honored under
     this default. Use `raw=True` on the endpoint to opt back in to full
     FTS5 syntax (syntax errors then return HTTP 400).
     """
-    return " ".join(f'"{t}"' for t in _fts_tokens(q))
+    tokens = _fts_tokens(q)
+    if not tokens:
+        return ""
+    return f'"{" ".join(tokens)}"'
 
 
 def sanitize_fts_phrase_in(column: str, q: str) -> str:
@@ -267,8 +276,8 @@ def search_papers(
 ) -> dict:
     """Full-text search across title/abstract/keywords/authors.
 
-    Default (`raw=False`): input is split into terms, each wrapped in
-    double quotes, AND'd together. Safe for arbitrary user input.
+    Default (`raw=False`): input is tokenized into one quoted phrase. Safe for
+    arbitrary user input and precise enough for longitudinal topic queries.
 
     With `raw=True`: input is passed to FTS5 as-is, so callers can use
     `foo OR bar`, `"exact phrase"`, `title:diffusion`, `reason*`. Malformed
@@ -419,7 +428,7 @@ def topic_trend(
     """Yearly paper count + citation-weighted volume for a topic query.
 
     `raw=True` passes the query to FTS5 verbatim (full operator support);
-    default sanitizes input into AND'd quoted terms.
+    default sanitizes input into one quoted phrase.
     """
     q_clean = _prepare_query(q, raw)
     if not q_clean:
@@ -473,6 +482,17 @@ def _tokenize_keywords(s: str) -> Iterable[str]:
         kw = p.strip().lower()
         if kw and kw not in _STOPWORDS and len(kw) > 1:
             out.append(kw)
+    return out
+
+
+def _tokenize_title_terms(s: str) -> Iterable[str]:
+    """Fallback terms for rows whose source metadata lacks `keywords`."""
+    if not s:
+        return []
+    out = []
+    for tok in _fts_tokens(s.lower()):
+        if tok not in _STOPWORDS and len(tok) > 2:
+            out.append(tok)
     return out
 
 
@@ -554,7 +574,10 @@ def topic_evolution(
         start = year_from + ((r["year"] - year_from) // window) * window
         bucket = buckets[start]
         bucket["n_papers"] += 1
-        for kw in _tokenize_keywords(r["keywords"]):
+        terms = list(_tokenize_keywords(r["keywords"]))
+        if not terms:
+            terms = list(_tokenize_title_terms(r["title"]))
+        for kw in terms:
             bucket["keywords"][kw] += 1
         if r["conf"]:
             bucket["venues"][r["conf"]] += 1
@@ -622,27 +645,47 @@ def author_trajectory(
     conn: sqlite3.Connection,
     *,
     name: str,
+    conferences: Optional[list[str]] = None,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
+    exclude_rejected: bool = True,
+    max_matches: Optional[int] = None,
 ) -> dict:
     """List papers by an author across years, grouped for trajectory analysis."""
     if not name or not name.strip():
-        return {"name": name, "by_year": []}
+        return {"name": name, "total_papers": 0, "by_year": []}
 
     # We match against the `authors` FTS column as an exact-phrase token.
     q_phrase = sanitize_fts_phrase_in("authors", name)
     if not q_phrase:
         return {"name": name, "total_papers": 0, "by_year": []}
+    conf_sql, conf_params = _conf_filter(conferences)
     year_sql, year_params = _year_filter(year_from, year_to)
-    sql = f"""
-        SELECT p.year, p.conf, p.paper_id, p.title, p.authors, p.gs_citation, p.status
+    excl_sql, excl_params = _exclude_rejected_filter(exclude_rejected)
+    from_where_sql = f"""
         FROM papers_fts
         JOIN papers p ON p.id = papers_fts.rowid
         WHERE papers_fts MATCH ?
-          {year_sql}
-        ORDER BY p.year DESC, p.gs_citation DESC NULLS LAST
+          {conf_sql}{year_sql}{excl_sql}
     """
-    rows = _run_fts(conn, sql, [q_phrase, *year_params])
+    params = [q_phrase, *conf_params, *year_params, *excl_params]
+    _enforce_analysis_match_cap(
+        conn,
+        f"SELECT COUNT(*) AS n {from_where_sql}",
+        params,
+        raw=False,
+        endpoint="author_trajectory",
+        max_matches=max_matches or MAX_AUTHOR_TRAJECTORY_MATCHES,
+    )
+    rows = _run_fts(
+        conn,
+        f"""
+        SELECT p.year, p.conf, p.paper_id, p.title, p.authors, p.gs_citation, p.status
+        {from_where_sql}
+        ORDER BY p.year DESC, p.gs_citation DESC NULLS LAST
+        """,
+        params,
+    )
 
     by_year: dict[int, list] = {}
     for r in rows:
@@ -656,6 +699,7 @@ def author_trajectory(
 
     return {
         "name": name,
+        "exclude_rejected": exclude_rejected,
         "total_papers": sum(len(v) for v in by_year.values()),
         "by_year": [
             {"year": y, "papers": by_year[y]} for y in sorted(by_year, reverse=True)
@@ -782,6 +826,7 @@ def compare_periods(
             "keyword_diff": empty,
             "author_diff": empty,
             "affiliation_diff": empty,
+            "venue_diff": empty,
         }
 
     lo = min(period_a[0], period_b[0])
@@ -805,7 +850,7 @@ def compare_periods(
     rows = _run_fts(
         conn,
         f"""
-        SELECT p.authors, p.affiliations, p.keywords, p.year
+        SELECT p.authors, p.affiliations, p.keywords, p.conf, p.year
         {from_where_sql}
         """,
         params,
@@ -813,7 +858,13 @@ def compare_periods(
     )
 
     def _empty_bucket() -> dict:
-        return {"n_papers": 0, "authors": Counter(), "affiliations": Counter(), "keywords": Counter()}
+        return {
+            "n_papers": 0,
+            "authors": Counter(),
+            "affiliations": Counter(),
+            "keywords": Counter(),
+            "venues": Counter(),
+        }
 
     a = _empty_bucket()
     b = _empty_bucket()
@@ -830,6 +881,8 @@ def compare_periods(
                 bucket["affiliations"][aff] += 1
         for kw in _tokenize_keywords(r["keywords"]):
             bucket["keywords"][kw] += 1
+        if r["conf"]:
+            bucket["venues"][r["conf"]] += 1
 
     for r in rows:
         if period_a[0] <= r["year"] <= period_a[1]:
@@ -858,6 +911,7 @@ def compare_periods(
         "keyword_diff": _diff(a["keywords"], b["keywords"], top_k),
         "author_diff": _diff(a["authors"], b["authors"], top_k),
         "affiliation_diff": _diff(a["affiliations"], b["affiliations"], top_k),
+        "venue_diff": _diff(a["venues"], b["venues"], top_k),
     }
 
 

@@ -90,8 +90,8 @@ The output contract is identical between Railway-hosted and local sqlite modes.
 | `top_papers` | `GET /v1/top_papers/{conf}/{year}` | Ranked by citation or rating |
 
 Common params: `q` (query), `conferences` (comma list like `iclr,nips,icml`),
-`year_from`/`year_to`, and `exclude_rejected` (default `true` for **all** search,
-trend, AND ranking endpoints — including `top_papers`). Pass
+`year_from`/`year_to`, and `exclude_rejected` (default `true` for search,
+trend, ranking, and `author_trajectory` endpoints — including `top_papers`). Pass
 `exclude_rejected=false` only when you explicitly want raw corpus diagnostics
 that include Reject / Withdraw entries. Abstracts are off by default to control
 egress — pass `include_abstract=true` only if you need the full text.
@@ -106,7 +106,8 @@ egress — pass `include_abstract=true` only if you need the full text.
   (`total` is kept as a back-compat alias for one release; prefer `total_matches`.)
   The hosted API caps `offset` at 10k to avoid expensive deep pagination.
 - `compare_periods` returns each period as `{years: [a, b], year_from, year_to, n_papers}`
-  — both shapes are populated, pick whichever is more ergonomic.
+  — both shapes are populated, pick whichever is more ergonomic. It also
+  returns `venue_diff` alongside keyword, author, and affiliation diffs.
 - `topic_evolution` adds `ranking_basis` to each window: `"gs_citation"` when
   citations are meaningful, `"rating_avg+status_fallback"` for the current year
   where citations are near-zero. Treat landmark order as a heuristic in the
@@ -142,9 +143,10 @@ scripts/paperlists.py conference_stats conf=iclr year=2024
 
 ### Pattern 4 — Author-centric
 ```bash
-scripts/paperlists.py author_trajectory name="Yann LeCun" year_from=2020
+scripts/paperlists.py author_trajectory name="Yann LeCun" year_from=2020 conferences=iclr,nips,icml
 ```
-Use the canonical name as it appears on publications.
+Use the canonical full name as it appears on publications. Very broad names
+return `too_many_matches`; narrow by full name, year range, or venue.
 
 ## Efficiency tips for agents
 
@@ -156,12 +158,12 @@ Use the canonical name as it appears on publications.
   wants temporal analysis — one call gives you the structured story.
 - **Set `limit` aggressively low** (5–10) on exploratory `search_papers`
   calls; raise it only after the user confirms direction.
-- **Default sanitizer**: hyphens and stop-words are handled server-side
+- **Default sanitizer**: hyphens are handled server-side
   ("in-context learning" works). Operators (`OR`, `NOT`, `NEAR`), prefix
-  (`reason*`), column filters (`title:diffusion`), and exact phrases
-  (`"step by step"`) are **NOT** parsed in the default mode — input is
-  split into terms and AND'd. Pass `raw=true` on the endpoint when you
-  need full FTS5 syntax (malformed expressions then return HTTP 400).
+  (`reason*`), column filters (`title:diffusion`), and explicit quote syntax
+  are **NOT** parsed in the default mode — input is tokenized into one safe
+  phrase. Pass `raw=true` on the endpoint when you need full FTS5 syntax
+  (malformed expressions then return HTTP 400).
 
 ## Bundled script
 

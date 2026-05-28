@@ -267,8 +267,8 @@ def test_landmark_uses_citation_sort_above_threshold(tmp_path: Path) -> None:
 
 def test_raw_mode_enables_fts5_operators(tmp_path: Path) -> None:
     """codex round-2 P2b: with `raw=False` (default) FTS5 operators like
-    OR and column filters are treated as literal tokens. With `raw=True`
-    they regain their FTS5 meaning."""
+    OR and column filters are neutralized inside a safe phrase. With
+    `raw=True` they regain their FTS5 meaning."""
     _write_json(
         tmp_path / "iclr" / "iclr2025.json",
         [
@@ -281,8 +281,8 @@ def test_raw_mode_enables_fts5_operators(tmp_path: Path) -> None:
     build_index(tmp_path, db_path, force=True)
 
     with _connect(db_path) as conn:
-        # Default sanitizer: "diffusion OR transformer" is AND'd as 3 terms,
-        # so only papers containing all three words (none) match.
+        # Default sanitizer: "diffusion OR transformer" is treated as a
+        # literal safe phrase, so neither one-term paper matches.
         default_out = queries.search_papers(conn, q="diffusion OR transformer")
         assert default_out["total_matches"] == 0
 
@@ -291,6 +291,55 @@ def test_raw_mode_enables_fts5_operators(tmp_path: Path) -> None:
         assert raw_out["total_matches"] == 2
         titles = {r["title"] for r in raw_out["results"]}
         assert titles == {"diffusion model", "transformer model"}
+
+
+def test_default_multiword_query_is_phrase_not_token_and(tmp_path: Path) -> None:
+    """Default topic matching must not fabricate longitudinal trends for
+    emerging multi-word directions by matching generic terms far apart."""
+    _write_json(
+        tmp_path / "iclr" / "iclr2022.json",
+        [
+            {
+                "id": "false-history",
+                "title": "Test time adaptation with scaling laws",
+                "keywords": "adaptation",
+                "status": "Poster",
+            }
+        ],
+    )
+    _write_json(
+        tmp_path / "iclr" / "iclr2025.json",
+        [
+            {
+                "id": "real-topic",
+                "title": "Test Time Scaling for Reasoning",
+                "keywords": "test time scaling",
+                "status": "Poster",
+            }
+        ],
+    )
+    db_path = tmp_path / "papers.db"
+    build_index(tmp_path, db_path, force=True)
+
+    with _connect(db_path) as conn:
+        default = queries.topic_trend(
+            conn, q="test time scaling", year_from=2022, year_to=2025
+        )
+        assert [(row["year"], row["papers"]) for row in default["series"]] == [
+            (2025, 1)
+        ]
+
+        token_and = queries.topic_trend(
+            conn,
+            q='"test" "time" "scaling"',
+            year_from=2022,
+            year_to=2025,
+            raw=True,
+        )
+        assert [(row["year"], row["papers"]) for row in token_and["series"]] == [
+            (2022, 1),
+            (2025, 1),
+        ]
 
 
 def test_raw_mode_malformed_query_raises_typed_error(tmp_path: Path) -> None:

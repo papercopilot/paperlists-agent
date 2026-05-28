@@ -99,8 +99,8 @@ def search_papers(
     """Full-text search over title / abstract / keywords / authors.
 
     Args:
-        query: Free-text query. By default, input is split into terms and
-            AND'd together (safe for arbitrary user input). To use FTS5
+        query: Free-text query. By default, input is treated as one safe
+            phrase (safe for arbitrary user input). To use FTS5
             operators (`foo OR bar`, `"exact phrase"`, `title:diffusion`,
             `reason*`), set `raw=True`.
         conferences: Comma-separated venue list (e.g. "iclr,nips,icml").
@@ -222,14 +222,15 @@ def compare_periods(
     raw: bool = False,
 ) -> dict:
     """Diff a topic between two year ranges. Returns three buckets per
-    dimension (keywords, authors, affiliations):
+    dimension (keywords, authors, affiliations, venues):
 
     - **emerged**: present in period B but not period A
     - **faded**: present in period A but not period B
     - **sustained**: present in both, sorted by total volume
 
     Use when you have a hypothesis like "RLHF moved from RL conferences to
-    NLP conferences between 2022 and 2024" — this tool will confirm or refute.
+    NLP conferences between 2022 and 2024" — `venue_diff` helps confirm or
+    refute that shift directly.
 
     Each period in the response exposes both `years: [a, b]` and flat
     `year_from`/`year_to` fields. Set `raw=True` for FTS5 operator support.
@@ -248,16 +249,24 @@ def compare_periods(
 @mcp.tool()
 def author_trajectory(
     name: str,
+    conferences: Optional[str] = None,
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
+    exclude_rejected: bool = True,
 ) -> dict:
     """Papers by an author across years, useful for tracking a researcher's
     topical pivots or productivity. Match is on the `authors` field — use
     the canonical name as it appears in publications.
+
+    `exclude_rejected` defaults to True so withdrawn/rejected OpenReview
+    submissions do not dominate "what are they working on now" summaries.
+    Narrow common names with full names, years, and venues.
     """
     return _get(
         "/v1/author_trajectory",
-        name=name, year_from=year_from, year_to=year_to,
+        name=name, conferences=conferences,
+        year_from=year_from, year_to=year_to,
+        exclude_rejected=exclude_rejected,
     )
 
 

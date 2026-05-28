@@ -127,6 +127,14 @@ def _client_ip(req: Request) -> str:
     return req.client.host if req.client else "unknown"
 
 
+def _validate_year_range(start: Optional[int], end: Optional[int], label: str) -> None:
+    if start is not None and end is not None and start > end:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label}_from must be <= {label}_to",
+        )
+
+
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
     if request.url.path in ("/", "/healthz", "/v1/coverage", "/v1/corpus_manifest"):
@@ -189,13 +197,13 @@ _RAW_DESC = (
     "If true, pass the query string to FTS5 verbatim — enables operators "
     "(`foo OR bar`, `\"exact phrase\"`, `title:diffusion`, `reason*`) at "
     "the cost of HTTP 400 on syntax errors. Default false: input is "
-    "split into terms and AND'd, safe for any user input."
+    "tokenized into one safe quoted phrase."
 )
 
 
 @app.get("/v1/search")
 def search(
-    q: str = Query(..., min_length=1, max_length=200, description="Query string. By default input is treated as AND'd terms; set raw=true for full FTS5 syntax."),
+    q: str = Query(..., min_length=1, max_length=200, description="Query string. By default input is treated as one safe phrase; set raw=true for full FTS5 syntax."),
     conferences: Optional[str] = Query(None, description="Comma-separated conf list, e.g. 'iclr,nips,icml'."),
     year_from: Optional[int] = Query(None, ge=1990, le=2100),
     year_to: Optional[int] = Query(None, ge=1990, le=2100),
@@ -206,6 +214,7 @@ def search(
     include_abstract: bool = Query(False, description="Include abstract in each result. Off by default to control egress."),
     raw: bool = Query(False, description=_RAW_DESC),
 ):
+    _validate_year_range(year_from, year_to, "year")
     confs = [c.strip().lower() for c in conferences.split(",")] if conferences else None
     with connect() as conn:
         return queries.search_papers(
@@ -232,11 +241,12 @@ def get_paper(conf: str, paper_id: str):
 def topic_trend(
     q: str = Query(..., min_length=1, max_length=200),
     conferences: Optional[str] = Query(None),
-    year_from: Optional[int] = Query(None),
-    year_to: Optional[int] = Query(None),
+    year_from: Optional[int] = Query(None, ge=1990, le=2100),
+    year_to: Optional[int] = Query(None, ge=1990, le=2100),
     exclude_rejected: bool = Query(True),
     raw: bool = Query(False, description=_RAW_DESC),
 ):
+    _validate_year_range(year_from, year_to, "year")
     confs = [c.strip().lower() for c in conferences.split(",")] if conferences else None
     with connect() as conn:
         return queries.topic_trend(
@@ -257,6 +267,7 @@ def topic_evolution(
     exclude_rejected: bool = Query(True),
     raw: bool = Query(False, description=_RAW_DESC),
 ):
+    _validate_year_range(year_from, year_to, "year")
     confs = [c.strip().lower() for c in conferences.split(",")] if conferences else None
     with connect() as conn:
         return queries.topic_evolution(
@@ -269,12 +280,18 @@ def topic_evolution(
 @app.get("/v1/author_trajectory")
 def author_trajectory(
     name: str = Query(..., min_length=2, max_length=120),
-    year_from: Optional[int] = Query(None),
-    year_to: Optional[int] = Query(None),
+    conferences: Optional[str] = Query(None),
+    year_from: Optional[int] = Query(None, ge=1990, le=2100),
+    year_to: Optional[int] = Query(None, ge=1990, le=2100),
+    exclude_rejected: bool = Query(True),
 ):
+    _validate_year_range(year_from, year_to, "year")
+    confs = [c.strip().lower() for c in conferences.split(",")] if conferences else None
     with connect() as conn:
         return queries.author_trajectory(
-            conn, name=name, year_from=year_from, year_to=year_to,
+            conn, name=name, conferences=confs,
+            year_from=year_from, year_to=year_to,
+            exclude_rejected=exclude_rejected,
         )
 
 
@@ -308,6 +325,8 @@ def compare_periods(
     exclude_rejected: bool = Query(True),
     raw: bool = Query(False, description=_RAW_DESC),
 ):
+    _validate_year_range(period_a_from, period_a_to, "period_a")
+    _validate_year_range(period_b_from, period_b_to, "period_b")
     confs = [c.strip().lower() for c in conferences.split(",")] if conferences else None
     with connect() as conn:
         return queries.compare_periods(

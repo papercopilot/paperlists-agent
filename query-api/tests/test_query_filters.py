@@ -140,3 +140,164 @@ def test_landscape_and_period_diff_support_conference_filter(tmp_path: Path) -> 
     assert landscape["venue_distribution"] == [("iclr", 1)]
     assert diff["period_a"]["n_papers"] == 1
     assert diff["period_b"]["n_papers"] == 1
+
+
+def test_compare_periods_includes_venue_diff(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "iclr" / "iclr2021.json",
+        [{"id": "old", "title": "rlhf", "keywords": "rlhf", "status": "Poster"}],
+    )
+    _write_json(
+        tmp_path / "acl" / "acl2025.json",
+        [{"id": "new", "title": "rlhf", "keywords": "rlhf", "status": "Long"}],
+    )
+
+    db_path = tmp_path / "papers.db"
+    build_index(tmp_path, db_path, force=True)
+
+    with _connect(db_path) as conn:
+        diff = queries.compare_periods(
+            conn,
+            q="rlhf",
+            period_a=(2020, 2022),
+            period_b=(2023, 2025),
+        )
+
+    assert diff["venue_diff"]["faded"] == [("iclr", 1)]
+    assert diff["venue_diff"]["emerged"] == [("acl", 1)]
+
+
+def test_topic_evolution_uses_title_terms_when_keywords_are_missing(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "nips" / "nips2020.json",
+        [
+            {
+                "id": "rag",
+                "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+                "status": "Poster",
+            }
+        ],
+    )
+
+    db_path = tmp_path / "papers.db"
+    build_index(tmp_path, db_path, force=True)
+
+    with _connect(db_path) as conn:
+        out = queries.topic_evolution(
+            conn,
+            q="retrieval augmented generation",
+            year_from=2020,
+            year_to=2020,
+        )
+
+    keywords = [term for term, _ in out["windows"][0]["top_keywords"]]
+    assert "retrieval" in keywords
+    assert "augmented" in keywords
+    assert "generation" in keywords
+
+
+def test_author_trajectory_excludes_rejected_by_default_and_supports_filters(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "iclr" / "iclr2025.json",
+        [
+            {
+                "id": "accepted",
+                "title": "Accepted reasoning",
+                "author": "Yejin Choi",
+                "status": "Poster",
+                "gs_citation": 10,
+            },
+            {
+                "id": "rejected",
+                "title": "Rejected reasoning",
+                "author": "Yejin Choi",
+                "status": "Reject",
+                "gs_citation": 100,
+            },
+        ],
+    )
+    _write_json(
+        tmp_path / "acl" / "acl2025.json",
+        [
+            {
+                "id": "acl-paper",
+                "title": "ACL reasoning",
+                "author": "Yejin Choi",
+                "status": "Findings",
+                "gs_citation": 20,
+            }
+        ],
+    )
+
+    db_path = tmp_path / "papers.db"
+    build_index(tmp_path, db_path, force=True)
+
+    with _connect(db_path) as conn:
+        out = queries.author_trajectory(conn, name="Yejin Choi")
+        titles = [paper["title"] for year in out["by_year"] for paper in year["papers"]]
+        assert titles == ["ACL reasoning", "Accepted reasoning"]
+        assert out["exclude_rejected"] is True
+
+        iclr = queries.author_trajectory(
+            conn, name="Yejin Choi", conferences=["iclr"]
+        )
+        iclr_titles = [
+            paper["title"] for year in iclr["by_year"] for paper in year["papers"]
+        ]
+        assert iclr_titles == ["Accepted reasoning"]
+
+        raw = queries.author_trajectory(
+            conn, name="Yejin Choi", exclude_rejected=False
+        )
+        raw_titles = [
+            paper["title"] for year in raw["by_year"] for paper in year["papers"]
+        ]
+        assert raw_titles == ["Rejected reasoning", "ACL reasoning", "Accepted reasoning"]
+
+
+def test_author_trajectory_fails_closed_for_overly_broad_names(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "iclr" / "iclr2025.json",
+        [
+            {"id": "a", "title": "Paper A", "author": "Li", "status": "Poster"},
+            {"id": "b", "title": "Paper B", "author": "Li", "status": "Poster"},
+        ],
+    )
+    db_path = tmp_path / "papers.db"
+    build_index(tmp_path, db_path, force=True)
+
+    with _connect(db_path) as conn:
+        try:
+            queries.author_trajectory(conn, name="Li", max_matches=1)
+        except queries.TooManyMatchesError as exc:
+            assert exc.endpoint == "author_trajectory"
+            assert exc.matches == 2
+            assert exc.max_matches == 1
+        else:
+            raise AssertionError("expected TooManyMatchesError")
+
+
+def test_api_rejects_reversed_year_ranges() -> None:
+    from fastapi.testclient import TestClient
+    from paperlists_api import main as m
+
+    client = TestClient(m.app)
+    resp = client.get(
+        "/v1/topic_evolution",
+        params={"q": "reasoning", "year_from": 2025, "year_to": 2024},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "year_from must be <= year_to"
+
+    resp = client.get(
+        "/v1/compare_periods",
+        params={
+            "q": "reasoning",
+            "period_a_from": 2025,
+            "period_a_to": 2024,
+            "period_b_from": 2023,
+            "period_b_to": 2024,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "period_a_from must be <= period_a_to"

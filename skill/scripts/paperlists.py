@@ -16,13 +16,13 @@ Examples:
     paperlists.py topic_evolution q="retrieval augmented" year_from=2020 year_to=2025 window=1 conferences=iclr,nips,icml
     paperlists.py compare_periods q="moe" period_a_from=2018 period_a_to=2020 period_b_from=2022 period_b_to=2024 exclude_rejected=false
     paperlists.py field_landscape q="mechanistic interpretability" year=2024 conferences=iclr,nips,icml
-    paperlists.py author_trajectory name="Yann LeCun" year_from=2020
+    paperlists.py author_trajectory name="Yann LeCun" year_from=2020 conferences=iclr,nips,icml
     paperlists.py paper conf=iclr paper_id=00SnKBGTsz
     paperlists.py conference_stats conf=iclr year=2024
     paperlists.py top_papers conf=nips year=2023 by=gs_citation top_k=10
 
 Notes on `q=` queries:
-    By default, input is split into terms and AND'd. To use FTS5 operators
+    By default, input is treated as one safe phrase. To use FTS5 operators
     (`OR`, `NEAR`, prefix `*`, column filters like `title:foo`, exact
     phrases), append `raw=true`. Bad raw queries return HTTP 400 with
     {"error":"invalid_query"}.
